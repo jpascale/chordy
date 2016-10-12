@@ -1,4 +1,4 @@
--module(node1).
+-module(node2).
 -export([start/1, start/2]).
 -define(Stabilize, 1000).
 -define(Timeout, 10000).
@@ -152,3 +152,43 @@ remove_probe(T, Nodes) ->
 
 forward_probe(Ref, T, Nodes, Id, {_, Spid}) ->
 	Spid ! {probe, Ref, Nodes ++ [Id], T}.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%% storage
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Create a new store
+create() -> [].
+
+% Add a key value pair, return the updated
+% store
+add(Key, Value, Store) ->
+	[{Key, Value} | Store].
+
+% Return a tuple {Key, Value} or the atom false
+lookup(Key, Store) ->
+	case lists:keyfind(Key, 1, Store) of
+		{Key, Value} ->	     
+			Value;
+		false ->
+			false
+	end.
+
+% Return a tuple {Updated, Rest} where the
+% updated store only contains the key value pairs requested and the rest
+% are found in a list of key-value pairs
+split(From, To, Store) ->
+	lists:foldl(fun({Key, Value}, {Split1, Split2}) ->
+						case key:between(Key, To, From) of
+							true ->
+								{[{Key, Value} | Split1], Split2};
+							false ->
+								{Split1, [{Key, Value} | Split2]}
+						end
+
+					end, {[],[]}, Store).
+
+% add a list of key-value pairs to a store
+merge(Entries, Store) ->
+	lists:append(Entries, Store).
