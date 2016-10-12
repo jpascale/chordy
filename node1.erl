@@ -1,5 +1,5 @@
 -module(node1).
--export([start/1, start/2]).
+-export([start/1, start/2, between/3]).
 -define(Stabilize, 1000).
 -define(Timeout, 10000).
 
@@ -53,6 +53,8 @@ node(Id, Predecessor, Successor) ->
 
 		% A new node tells "I'm your predecessor", we do not trust
 		{notify, New} ->
+			{Nkey, _} = New,
+			io:format("Node ~p: Node ~p tells me i'm your predecessor", [Id, Nkey]),
 			Pred = notify(New, Id, Predecessor),
 			node(Id, Pred, Successor);
 

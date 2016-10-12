@@ -14,7 +14,7 @@ init(Id, Peer) ->
 	Predecessor = nil,
 	{ok, Successor} = connect(Id, Peer),
 	schedule_stabilize(),
-	node(Id, Predecessor, Successor).
+	node(Id, Predecessor, Successor, storage:create()).
 
 connect(Id, nil) -> % We are alone
 	{ok, {Id, self()}};
@@ -44,43 +44,81 @@ between(Key, From, To) ->
 			true
 	end.
 
-node(Id, Predecessor, Successor) ->
+node(Id, Predecessor, Successor, Store) ->
 	receive
 		% A peer needs to know our key
 		{key, Qref, Peer} ->
 			Peer ! {Qref, Id},
-			node(Id, Predecessor, Successor);
+			node(Id, Predecessor, Successor, Store);
 
 		% A new node tells "I'm your predecessor", we do not trust
 		{notify, New} ->
-			Pred = notify(New, Id, Predecessor),
-			node(Id, Pred, Successor);
+			{Nkey, _} = New,
+			io:format("Node ~p: Node ~p tells me i'm your predecessor.~n", [Id, Nkey]),
+			{Pred, St} = notify(New, Id, Predecessor, Store),
+			node(Id, Pred, Successor, St);
 
 		% A node(a predecessor) wants to know our predecessor
 		{request, Peer} ->
 			request(Peer, Predecessor),
-			node(Id, Predecessor, Successor);
+			node(Id, Predecessor, Successor, Store);
 
 		% Our successor informs us about its predecessor
 		{status, Pred} ->
 			Succ = stabilize(Pred, Id, Successor),
-			node(Id, Predecessor, Succ);
+			node(Id, Predecessor, Succ, Store);
 
 		stabilize ->
 			stabilize(Successor),
-			node(Id, Predecessor, Successor);
+			node(Id, Predecessor, Successor, Store);
+
+		{add, Key, Value, Qref, Client} ->
+			Added = add(Key, Value, Qref, Client,
+			Id, Predecessor, Successor, Store),
+			node(Id, Predecessor, Successor, Added);
+
+		{lookup, Key, Qref, Client} ->
+			lookup(Key, Qref, Client, Id, Predecessor, Successor, Store),
+			node(Id, Predecessor, Successor, Store);
+
+		{handover, Elements} ->
+			Merged = storage:merge(Store, Elements),
+			node(Id, Predecessor, Successor, Merged);
 
 		probe ->
 			create_probe(Id, Successor),
-			node(Id, Predecessor, Successor);
+			node(Id, Predecessor, Successor, Store);
 
 		{probe, Id, Nodes, T} ->
 			remove_probe(T, Nodes),
-			node(Id, Predecessor, Successor);
+			node(Id, Predecessor, Successor, Store);
 
 		{probe, Ref, Nodes, T} ->
 			forward_probe(Ref, T, Nodes, Id, Successor),
-			node(Id, Predecessor, Successor)
+			node(Id, Predecessor, Successor, Store)
+	end.
+%%TODO: Check
+add(Key, Value, Qref, Client,
+				 Id, {Pkey, _}, {_, Spid}, Store) ->
+	case between(Key, Pkey, Id) of
+		true ->
+			Client ! {Qref, ok},
+			storage:add(Key, Value, Store);
+		
+		false ->
+			Spid ! {add, Key, Value, Qref, Client},
+			Store
+	end.
+
+%%TODO: Check
+lookup(Key, Qref, Client, Id, {Pkey, _}, Successor, Store) ->
+	case between(Key, Pkey, Id) of
+		true ->
+			Result = storage:lookup(Key, Store),
+			Client ! {Qref, Result};
+		false ->
+			{_, Spid} = Successor,
+			Spid ! {lookup, Key, Qref, Client}
 	end.
 
 stabilize(Pred, Id, Successor) ->
@@ -125,20 +163,34 @@ request(Peer, Predecessor) ->
 			Peer ! {status, {Pkey, Ppid}}
 	end.
 
-notify({Nkey, Npid}, Id, Predecessor) ->
+%%%%TODO: RE CONTRA CHECK
+notify({Nkey, Npid}, Id, Predecessor, Store) ->
 	case Predecessor of
 		nil ->
-			{Nkey, Npid};
+			Keep = handover(Id, Store, Nkey, Npid),
+			{{Nkey, Npid}, Keep};
 
 	{Pkey, _} ->
 		case between(Nkey, Pkey, Id) of
 			true ->
-				{Nkey, Npid};
+				Keep = handover(Id, Store, Nkey, Npid),
+				{{Nkey, Npid}, Keep};
 			false ->
-				Predecessor
+				{Predecessor, Store}
 		end
 	end.
 
+%storage:split(1, 5, [{1,a},{2,a},{3,a},{4,a},{5,a},{6,a},{7,a},{8,a},{9,a},{10,a}]).
+%{[{10,a},{9,a},{8,a},{7,a},{6,a},{1,a}],
+% [{5,a},{4,a},{3,a},{2,a}]}
+%23> storage:split(5, 1, [{1,a},{2,a},{3,a},{4,a},{5,a},{6,a},{7,a},{8,a},{9,a},{10,a}]).
+%{[{5,a},{4,a},{3,a},{2,a}],
+% [{10,a},{9,a},{8,a},{7,a},{6,a},{1,a}]}
+
+handover(Id, Store, Nkey, Npid) ->
+	{Keep, Rest} = storage:split(Id, Nkey, Store), %%%%%%%%%TODO: Check % Creo que esta bien
+	Npid ! {handover, Rest},
+	Keep.
 
 create_probe(Id, {_, Spid}) ->
 	Spid ! {probe, Id, [Id], erlang:system_time(micro_seconds)}.
@@ -152,43 +204,3 @@ remove_probe(T, Nodes) ->
 
 forward_probe(Ref, T, Nodes, Id, {_, Spid}) ->
 	Spid ! {probe, Ref, Nodes ++ [Id], T}.
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%% storage
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-% Create a new store
-create() -> [].
-
-% Add a key value pair, return the updated
-% store
-add(Key, Value, Store) ->
-	[{Key, Value} | Store].
-
-% Return a tuple {Key, Value} or the atom false
-lookup(Key, Store) ->
-	case lists:keyfind(Key, 1, Store) of
-		{Key, Value} ->	     
-			Value;
-		false ->
-			false
-	end.
-
-% Return a tuple {Updated, Rest} where the
-% updated store only contains the key value pairs requested and the rest
-% are found in a list of key-value pairs
-split(From, To, Store) ->
-	lists:foldl(fun({Key, Value}, {Split1, Split2}) ->
-						case key:between(Key, To, From) of
-							true ->
-								{[{Key, Value} | Split1], Split2};
-							false ->
-								{Split1, [{Key, Value} | Split2]}
-						end
-
-					end, {[],[]}, Store).
-
-% add a list of key-value pairs to a store
-merge(Entries, Store) ->
-	lists:append(Entries, Store).
